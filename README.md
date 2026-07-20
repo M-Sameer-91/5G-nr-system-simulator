@@ -76,15 +76,3 @@ All scenario parameters live in `config_complete()` at the top of `main.m`:
 ## Output KPIs
 
 The console report and figures cover: DL/UL throughput (mean, median, 5th/95th percentile), SINR distribution, latency, handover counts, HARQ ACK/NACK/drop breakdown, Jain's fairness index, dual-connectivity active fraction, and per-slice (eMBB/URLLC/mMTC) performance.
-
-## Adding figures to this repo
-
-Export the six generated figures (e.g. `saveas(gcf, 'figures/kpi_dashboard.png')` after each `figure(...)` block, or use `exportgraphics`) and drop them into `figures/` before pushing, then reference them here, e.g.:
-
-```markdown
-![KPI Dashboard](figures/kpi_dashboard.png)
-```
-
-## License
-
-Released under the MIT License — see [LICENSE](LICENSE).
