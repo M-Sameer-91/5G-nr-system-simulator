@@ -1,0 +1,61 @@
+Config loaded: 7 cells, 70 users, 100 MHz @ 3.5 GHz, 277 RBs
+Initialized 7 cells, 70 users
+
+=== 5G NR COMPLETE SIMULATION ===
+Starting 1000 ticks with 70 users, 7 cells
+
+Progress:   5% | DL: 48.1 Mbps | UL: 2.6 Mbps | HO: 47 | Lat: 3.7 ms
+Progress:  10% | DL: 43.3 Mbps | UL: 2.0 Mbps | HO: 86 | Lat: 9.6 ms
+Progress:  15% | DL: 42.1 Mbps | UL: 2.5 Mbps | HO: 124 | Lat: 16.2 ms
+Progress:  20% | DL: 43.3 Mbps | UL: 2.6 Mbps | HO: 157 | Lat: 8.1 ms
+Progress:  25% | DL: 43.7 Mbps | UL: 2.3 Mbps | HO: 178 | Lat: 9.2 ms
+Progress:  30% | DL: 41.8 Mbps | UL: 2.4 Mbps | HO: 202 | Lat: 8.0 ms
+Progress:  35% | DL: 40.7 Mbps | UL: 2.3 Mbps | HO: 225 | Lat: 10.2 ms
+Progress:  40% | DL: 47.4 Mbps | UL: 3.2 Mbps | HO: 251 | Lat: 7.8 ms
+Progress:  45% | DL: 37.4 Mbps | UL: 2.0 Mbps | HO: 270 | Lat: 13.4 ms
+Progress:  50% | DL: 43.7 Mbps | UL: 2.5 Mbps | HO: 297 | Lat: 13.1 ms
+Progress:  55% | DL: 41.4 Mbps | UL: 2.4 Mbps | HO: 319 | Lat: 9.2 ms
+Progress:  60% | DL: 36.6 Mbps | UL: 2.4 Mbps | HO: 342 | Lat: 8.9 ms
+Progress:  65% | DL: 39.1 Mbps | UL: 2.6 Mbps | HO: 365 | Lat: 12.2 ms
+Progress:  70% | DL: 33.7 Mbps | UL: 1.8 Mbps | HO: 384 | Lat: 6.7 ms
+Progress:  75% | DL: 41.7 Mbps | UL: 2.5 Mbps | HO: 409 | Lat: 5.4 ms
+Progress:  80% | DL: 42.8 Mbps | UL: 2.6 Mbps | HO: 441 | Lat: 12.1 ms
+Progress:  85% | DL: 50.0 Mbps | UL: 3.0 Mbps | HO: 462 | Lat: 9.0 ms
+Progress:  90% | DL: 44.0 Mbps | UL: 2.4 Mbps | HO: 489 | Lat: 8.9 ms
+Progress:  95% | DL: 45.7 Mbps | UL: 2.6 Mbps | HO: 518 | Lat: 8.0 ms
+Progress: 100% | DL: 48.3 Mbps | UL: 3.4 Mbps | HO: 555 | Lat: 9.3 ms
+
+=== Simulation Complete ===
+
+====================================================
+          5G NR SIMULATION FINAL REPORT
+====================================================
+Cells: 7 | Users: 70 | Duration: 1000 ms
+Frequency: 3.5 GHz | BW: 100 MHz | MIMO: 64x4
+----------------------------------------------------
+DL Throughput  — Mean:  43.22 Mbps | Median:  46.71 Mbps
+               — 5th pct (cell-edge): 5.61 Mbps
+               — 95th pct (peak):     78.81 Mbps
+UL Throughput  — Mean:   2.53 Mbps
+SINR           — Mean:  15.5 dB | 5th pct: 4.8 dB
+Latency        — Mean:  9.20 ms | 95th pct: 10.9 ms
+Handovers      — Total: 555 (7.93/user)
+HARQ           — Retransmissions: 44327 | Drops: 4005
+Dual Conn      — Active fraction: 48.8%
+Jain Fairness  — 0.7574
+====================================================
+
+Per-Slice Performance:
+  Slice    | DL Mbps | SINR dB | Latency ms
+  eMBB     |   40.31 |    15.3 |       9.07
+  URLLC    |   32.62 |    15.8 |       9.53
+  mMTC     |   56.86 |    15.3 |       8.99
+
+Figures generated:
+  Fig 1 — Live network animation
+  Fig 2 — 9-panel performance analysis
+  Fig 3 — CDF curves (DL, SINR, Latency)
+  Fig 4 — HARQ outcome analysis
+  Fig 5 — KPI dashboard
+  Fig 6 — MU-MIMO & PF scheduler
+>> 
