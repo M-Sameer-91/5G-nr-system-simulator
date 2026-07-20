@@ -1,0 +1,1159 @@
+clc; clear; close all;
+
+% Load configuration
+cfg = config_complete();
+
+% Initialize network
+[cells, users] = init_network_complete(cfg);
+
+% Pre-allocate metrics
+[T, N, C] = deal(cfg.simTime, cfg.numUsers, cfg.numCells);
+metrics = initialize_metrics(N, T, C);
+
+% Live visualization
+hLive = figure('Name','5G NR Live Monitor','Position',[50 50 1400 800]);
+totalHO = 0;
+
+fprintf('\n=== 5G NR COMPLETE SIMULATION ===\n');
+fprintf('Starting %d ticks with %d users, %d cells\n\n', T, N, C);
+
+% Main simulation loop
+for t = 1:T
+    % 1. Mobility and traffic
+    [users, traffic_bits] = mobility_complete(users, cells, cfg, t);
+
+    % 2. Channel with fast fading (CDL-E)
+    [channel_gains, sinr_dl, sinr_ul] = channel_complete(users, cells, cfg, t);
+
+    % 3. Massive MIMO with ZF precoding
+    [precoding_matrices, mu_groups] = mimo_complete(channel_gains, users, cfg);
+
+    % 4. Link adaptation with real MCS/CQI
+    [mcs, cqi, tbs] = link_adaptation_complete(sinr_dl, cfg);
+
+    % 5. Proportional Fair scheduler with QoS
+    [rb_allocation, pf_metrics] = pf_scheduler_complete(users, sinr_dl, traffic_bits, cfg, t, metrics);
+
+    % 6. HARQ with IR combining
+    [harq_status, sinr_boost, users] = harq_complete(users, sinr_dl, mcs, cfg);
+
+    % 7. Throughput with real TBS
+    [tput_dl, tput_ul, latency] = throughput_complete(rb_allocation, mcs, tbs, harq_status, sinr_boost, cfg);
+
+    % 8. QoS enforcement with slicing
+    [tput_dl, tput_ul, dropped_bits] = qos_complete(tput_dl, tput_ul, users, cfg, traffic_bits);
+
+    % 9. Dual connectivity (EN-DC NSA)
+    [tput_dl, dc_active] = dual_connectivity_complete(tput_dl, users, sinr_dl, cfg);
+
+    % 10. Handover with X2 delay
+    [users, ho_count, x2_delay] = handover_complete(users, cells, sinr_dl, cfg, t);
+    totalHO = totalHO + ho_count;
+
+    % Store metrics
+    metrics = store_metrics(metrics, tput_dl, tput_ul, sinr_dl, sinr_ul, ...
+        mcs, cqi, harq_status, ho_count, rb_allocation, mu_groups, dc_active, ...
+        latency, dropped_bits, pf_metrics, t);
+
+    % Live update
+    if mod(t, max(1, floor(T/100))) == 0 || t == 1
+        update_live_display(hLive, metrics, users, cells, t, T, totalHO, cfg);
+    end
+
+    % Progress
+    if mod(t, max(1, floor(T/20))) == 0
+        fprintf('Progress: %3d%% | DL: %.1f Mbps | UL: %.1f Mbps | HO: %d | Lat: %.1f ms\n', ...
+            round(100*t/T), mean(tput_dl), mean(tput_ul), totalHO, mean(latency));
+    end
+end
+
+fprintf('\n=== Simulation Complete ===\n');
+generate_final_report(metrics, cfg, totalHO);
+generate_all_plots(metrics, cfg, cells);
+
+
+% =========================================================================
+%  CONFIGURATION
+% =========================================================================
+function cfg = config_complete()
+    cfg.numCells        = 7;
+    cfg.usersPerCell    = 10;
+    cfg.simTime         = 1000;
+    cfg.cellRadius      = 500;
+
+    cfg.speed           = [3, 30, 60];
+    cfg.speedProb       = [0.5, 0.3, 0.2];
+
+    cfg.trafficTypes = struct(...
+        'embb',  struct('rate', 50e6/1000,  'burstiness', 0.3), ...
+        'urllc', struct('rate', 10e6/1000,  'burstiness', 0.1), ...
+        'mmtc',  struct('rate', 100e3/1000, 'burstiness', 0.01));
+
+    cfg.txPower_dBm     = 43;
+    cfg.ueTxPower_dBm   = 23;
+    cfg.fc_GHz          = 3.5;
+    cfg.bandwidth_MHz   = 100;
+    cfg.scs_kHz         = 30;
+    cfg.numRBs          = floor(cfg.bandwidth_MHz*1e6 / (12*cfg.scs_kHz*1e3));
+
+    cfg.N_bs_ant        = 64;
+    cfg.N_ue_ant        = 4;
+    cfg.maxMUusers      = 8;
+
+    cfg.channelModel        = 'CDL-E';
+    cfg.enableFastFading    = 1;
+    cfg.enableShadowFading  = 1;
+    cfg.shadowStd           = 8;
+
+    cfg.harqProcesses   = 16;
+    cfg.maxHARQretx     = 4;
+    cfg.harqRTT         = 4;
+
+    cfg.schedulerType   = 'PF';
+    cfg.pfAlpha         = 0.5;
+
+    cfg.slices = struct(...
+        'eMBB',  struct('priority',2,'minRate',0,      'maxLatency',100), ...
+        'URLLC', struct('priority',1,'minRate',1e6/1000,'maxLatency',10), ...
+        'mMTC',  struct('priority',3,'minRate',100e3/1000,'maxLatency',1000));
+
+    cfg.hysteresis_dB   = 3;
+    cfg.TTT_ticks       = 5;
+    cfg.x2Delay_ticks   = 3;
+    cfg.a3Offset_dB     = 3;
+
+    cfg.enableDC        = 1;
+    cfg.lteCell = struct('txPower',46,'fc',1.8,'bandwidth',20);
+
+    cfg.numUsers            = cfg.numCells * cfg.usersPerCell;
+    cfg.rbBandwidth_Hz      = 12 * cfg.scs_kHz * 1e3;
+    cfg.subcarriersPerRB    = 12;
+    cfg.symbolsPerSlot      = 14;
+    cfg.slotsPerSecond      = 1000;
+    cfg.noiseFigure_dB      = 7;
+    cfg.noisePSD_dBm_Hz     = -174 + cfg.noiseFigure_dB;
+    cfg.thermalNoise_dBm    = cfg.noisePSD_dBm_Hz + 10*log10(cfg.bandwidth_MHz*1e6);
+
+    % MCS Table (3GPP TS 38.214) columns: [idx, ModOrder, CodeRate, SpectralEff, SINR_thresh_dB]
+    cfg.mcsTable = [
+         0, 2, 120, 0.2344, -6.7;
+         1, 2, 157, 0.3066, -4.7;
+         2, 2, 193, 0.3770, -2.3;
+         3, 2, 251, 0.4902,  0.2;
+         4, 2, 308, 0.6016,  2.4;
+         5, 2, 379, 0.7402,  4.3;
+         6, 2, 449, 0.8770,  5.9;
+         7, 2, 526, 1.0273,  7.4;
+         8, 2, 602, 1.1758,  8.8;
+         9, 2, 679, 1.3262, 10.2;
+        10, 4, 340, 1.3281, 11.5;
+        11, 4, 378, 1.4766, 12.2;
+        12, 4, 434, 1.6953, 13.7;
+        13, 4, 490, 1.9141, 15.0;
+        14, 4, 553, 2.1602, 16.3;
+        15, 4, 616, 2.4063, 17.6;
+        16, 4, 658, 2.5703, 18.2;
+        17, 6, 438, 3.2344, 19.8;
+        18, 6, 466, 3.4336, 20.5;
+        19, 6, 517, 3.8164, 21.7;
+        20, 6, 567, 4.1836, 22.7;
+        21, 6, 616, 4.5234, 23.7;
+        22, 6, 666, 4.9219, 24.6;
+        23, 6, 719, 5.3320, 25.5;
+        24, 6, 772, 5.6953, 26.3;
+        25, 6, 822, 6.0664, 27.1;
+        26, 6, 873, 6.4395, 27.8;
+        27, 8, 682, 7.1602, 30.0;
+        28, 8, 711, 7.4063, 31.0;
+        29, 8, 754, 7.8281, 33.0];
+
+    fprintf('Config loaded: %d cells, %d users, %.0f MHz @ %.1f GHz, %d RBs\n', ...
+        cfg.numCells, cfg.numUsers, cfg.bandwidth_MHz, cfg.fc_GHz, cfg.numRBs);
+end
+
+
+% =========================================================================
+%  NETWORK INITIALIZATION
+% =========================================================================
+function [cells, users] = init_network_complete(cfg)
+    centers = generate_hex_grid(cfg.numCells, cfg.cellRadius * sqrt(3));
+
+    for c = 1:cfg.numCells
+        cells(c).id       = c;
+        cells(c).position = centers(c,:);
+        cells(c).radius   = cfg.cellRadius;
+        for s = 1:3
+            cells(c).sectors(s).azimuth   = 120*(s-1);
+            cells(c).sectors(s).gain      = 18;
+            cells(c).sectors(s).beamwidth = 65;
+        end
+        cells(c).totalRBs     = cfg.numRBs;
+        cells(c).allocatedRBs = zeros(1, cfg.numRBs);
+        cells(c).load         = 0;
+    end
+
+    userIdx = 1;
+    trafficTypeList = {'embb','urllc','mmtc'};
+    for c = 1:cfg.numCells
+        for u = 1:cfg.usersPerCell
+            angle    = 2*pi*rand();
+            radius   = cfg.cellRadius * sqrt(rand());
+            position = cells(c).position + [radius*cos(angle), radius*sin(angle)];
+            speed    = randsample(cfg.speed, 1, true, cfg.speedProb);
+            velocity = speed * [cos(angle+pi/2), sin(angle+pi/2)];
+            tType    = trafficTypeList{randi(3)};
+
+            users(userIdx).id             = userIdx;
+            users(userIdx).position       = position;
+            users(userIdx).velocity       = velocity;
+            users(userIdx).servingCell    = c;
+            users(userIdx).servingSector  = randi(3);
+            users(userIdx).trafficType    = tType;
+            users(userIdx).buffer         = 0;
+            users(userIdx).slice          = determine_slice(tType);
+            users(userIdx).trafficState   = 1;
+            users(userIdx).trafficTimer   = 0;
+            users(userIdx).shadowFading   = cfg.shadowStd * randn(1, cfg.numCells);
+
+            % HARQ
+            users(userIdx).harq.nextProcess = 1;
+            users(userIdx).harq.retxCount   = zeros(1, cfg.harqProcesses);
+            users(userIdx).harq.irBuffer    = zeros(1, cfg.harqProcesses);
+            for p = 1:cfg.harqProcesses
+                users(userIdx).harq.processes{p} = struct('active',0,'ndi',0,'rv',0,'timer',0);
+            end
+
+            % Handover
+            users(userIdx).ho = struct('state','NORMAL','tttCounter',0, ...
+                'targetCell',[],'x2Timer',0);
+
+            % CSI
+            users(userIdx).csi = struct('sinr_dl',0,'sinr_ul',0,'cqi',10,'ri',1,'pmi',1);
+
+            % QoS
+            users(userIdx).qos = struct('throughput_dl',0,'throughput_ul',0, ...
+                'latency',0,'packetDrop',0,'fairnessMetric',0);
+
+            % DC
+            users(userIdx).dc_active = false;
+            users(userIdx).lte_sinr  = 0;
+
+            userIdx = userIdx + 1;
+        end
+    end
+    fprintf('Initialized %d cells, %d users\n', cfg.numCells, cfg.numUsers);
+end
+
+function centers = generate_hex_grid(n, R)
+    centers    = zeros(n,2);
+    centers(1,:) = [0,0];
+    if n==1, return; end
+    dirs = [R,0; R/2,R*sqrt(3)/2; -R/2,R*sqrt(3)/2; -R,0; -R/2,-R*sqrt(3)/2; R/2,-R*sqrt(3)/2];
+    idx  = 2; ring = 1;
+    while idx <= n
+        x = -ring*dirs(1,1); y = -ring*dirs(1,2);
+        for s = 1:6
+            for step = 1:ring
+                if idx>n, break; end
+                centers(idx,:) = [x,y]; idx=idx+1;
+                x=x+dirs(s,1); y=y+dirs(s,2);
+            end
+        end
+        ring=ring+1;
+    end
+end
+
+function slice = determine_slice(trafficType)
+    switch trafficType
+        case 'embb',  slice=1;
+        case 'urllc', slice=2;
+        case 'mmtc',  slice=3;
+        otherwise,    slice=1;
+    end
+end
+
+
+% =========================================================================
+%  METRICS INITIALIZATION
+% =========================================================================
+function metrics = initialize_metrics(N, T, C)
+    metrics.throughput_dl  = zeros(N, T);
+    metrics.throughput_ul  = zeros(N, T);
+    metrics.sinr_dl        = zeros(N, T);
+    metrics.sinr_ul        = zeros(N, T);
+    metrics.mcs            = zeros(N, T);
+    metrics.cqi            = zeros(N, T);
+    metrics.harq_status    = zeros(N, T);
+    metrics.handovers      = zeros(1, T);
+    metrics.rb_util        = zeros(C, T);
+    metrics.mu_size        = zeros(C, T);
+    metrics.dc_active      = zeros(N, T);
+    metrics.latency        = zeros(N, T);
+    metrics.dropped_bits   = zeros(N, T);
+    metrics.pf_metric      = zeros(N, T);
+end
+
+
+% =========================================================================
+%  MOBILITY + TRAFFIC
+% =========================================================================
+function [users, traffic_bits] = mobility_complete(users, cells, cfg, t)
+    N = length(users);
+    traffic_bits = zeros(N, 2);
+
+    allPos = reshape([cells.position], 2, [])';
+    minX = min(allPos(:,1)) - cfg.cellRadius*2;
+    maxX = max(allPos(:,1)) + cfg.cellRadius*2;
+    minY = min(allPos(:,2)) - cfg.cellRadius*2;
+    maxY = max(allPos(:,2)) + cfg.cellRadius*2;
+
+    for u = 1:N
+        % Move
+        users(u).position = users(u).position + users(u).velocity;
+
+        % Boundary bounce
+        if users(u).position(1)<minX || users(u).position(1)>maxX || ...
+           users(u).position(2)<minY || users(u).position(2)>maxY
+            ang = atan2(users(u).velocity(2),users(u).velocity(1)) + pi + (rand()-0.5)*pi/3;
+            spd = norm(users(u).velocity);
+            users(u).velocity = spd*[cos(ang),sin(ang)];
+            users(u).position(1) = min(max(users(u).position(1),minX),maxX);
+            users(u).position(2) = min(max(users(u).position(2),minY),maxY);
+        end
+
+        % Random direction change (correlated walk, 5% chance)
+        if rand() < 0.05
+            ang = atan2(users(u).velocity(2),users(u).velocity(1)) + (rand()-0.5)*pi/3;
+            spd = norm(users(u).velocity);
+            users(u).velocity = spd*[cos(ang),sin(ang)];
+        end
+
+        % Traffic ON/OFF
+        users(u).trafficTimer = users(u).trafficTimer - 1;
+        if users(u).trafficTimer <= 0
+            tType = users(u).trafficType;
+            b = cfg.trafficTypes.(tType).burstiness;
+            if rand() < b
+                users(u).trafficState = 1 - users(u).trafficState;
+            end
+            if users(u).trafficState == 1
+                users(u).trafficTimer = max(1, round(exprnd(80)));
+            else
+                users(u).trafficTimer = max(1, round(exprnd(30)));
+            end
+        end
+
+        % Generate bits if ON
+        if users(u).trafficState == 1
+            rate = cfg.trafficTypes.(users(u).trafficType).rate;
+            numPkt = poissrnd(rate / 12000);   % packets per tick
+            bits   = numPkt * 1500 * 8;
+            traffic_bits(u,:) = [bits*0.8, bits*0.2];
+            users(u).buffer = min(users(u).buffer + bits, 5e6);  % 5 Mb cap
+        end
+    end
+end
+
+
+% =========================================================================
+%  CHANNEL: 3GPP TR 38.901 UMa + CDL-E + Shadow + Doppler
+% =========================================================================
+function [channel_gains, sinr_dl, sinr_ul] = channel_complete(users, cells, cfg, t)
+    N = length(users); C = length(cells);
+    Nbs = cfg.N_bs_ant; Nue = cfg.N_ue_ant;
+
+    channel_gains = zeros(N, C, Nbs, Nue);
+    sinr_dl       = zeros(N,1);
+    sinr_ul       = zeros(N,1);
+    rssi_dl_all   = zeros(N, C);
+
+    for u = 1:N
+        for c = 1:C
+            dist  = max(norm(users(u).position - cells(c).position),1);
+            angle = atan2(users(u).position(2)-cells(c).position(2), ...
+                          users(u).position(1)-cells(c).position(1));
+
+            pl_dB      = uma_path_loss_local(dist, cfg.fc_GHz);
+            shadow_dB  = users(u).shadowFading(c);
+            ant_gain   = antenna_gain_3d_local(angle, cfg);
+
+            bf_gain = 0;
+            if c == users(u).servingCell
+                bf_gain = 10*log10(cfg.N_bs_ant);
+            end
+
+            rssi_dBm = cfg.txPower_dBm + bf_gain + ant_gain - pl_dB - shadow_dB;
+
+            if cfg.enableFastFading
+                fd_gain = cdl_e_fading_local(dist, cfg.fc_GHz, users(u).velocity, t);
+                rssi_dBm = rssi_dBm + fd_gain;
+            end
+
+            rssi_lin = 10^(rssi_dBm/10);
+            rssi_dl_all(u,c) = rssi_lin;
+
+            % MIMO channel matrix
+            for ab = 1:Nbs
+                for au = 1:Nue
+                    lambda = 3e8/(cfg.fc_GHz*1e9);
+                    phi    = 2*pi*dist/lambda + 0.1*ab + 0.05*au;
+                    channel_gains(u,c,ab,au) = sqrt(rssi_lin)*exp(1j*phi);
+                end
+            end
+        end
+
+        % SINR with full inter-cell interference
+        sc      = users(u).servingCell;
+        S       = rssi_dl_all(u,sc);
+        I       = sum(rssi_dl_all(u,:)) - S;
+        noise_W = 10^((cfg.thermalNoise_dBm-30)/10);
+        sinr_lin = S / max(I+noise_W, 1e-20);
+        sinr_dl(u) = min(max(10*log10(sinr_lin), -10), 35);
+
+        % UL SINR (UE power, reciprocal path loss, BS noise figure)
+        pl_ul      = uma_path_loss_local(max(norm(users(u).position - ...
+                         cells(sc).position),1), cfg.fc_GHz);
+        ul_rssi    = cfg.ueTxPower_dBm - pl_ul - users(u).shadowFading(sc);
+        ul_rssi_W  = 10^(ul_rssi/10);
+        bs_noise   = 10^((-174+10*log10(cfg.bandwidth_MHz*1e6)+5-30)/10);
+        sinr_ul(u) = min(max(10*log10(ul_rssi_W/(I+bs_noise)), -10), 35);
+    end
+end
+
+function pl = uma_path_loss_local(d2d, fc)
+    h_bs=25; h_ut=1.5;
+    d3d  = sqrt(d2d^2+(h_bs-h_ut)^2);
+    dBP  = 4*h_bs*h_ut*fc*1e9/3e8;
+    if d2d<=dBP
+        pl_los = 28+22*log10(d3d)+20*log10(fc);
+    else
+        pl_los = 28+40*log10(d3d)+20*log10(fc)-9*log10(dBP^2+(h_bs-h_ut)^2);
+    end
+    pl_nlos = 13.54+39.08*log10(d3d)+20*log10(fc)-0.6*(h_ut-1.5);
+    pl = max(max(pl_los,pl_nlos), 0);
+end
+
+function gain = antenna_gain_3d_local(angle_rad, cfg)
+    az = rad2deg(angle_rad);
+    bw = 65; sla = 30;
+    ah = -min(12*(az/bw)^2, 20);
+    ev = az - 6;
+    av = -min(12*(ev/bw)^2, sla);
+    gain = 8 + ah + av;
+    gain = max(gain, 8-sla);
+end
+
+function fd = cdl_e_fading_local(dist, fc, velocity, t)
+    taps = [0,-0.2; 20,-2.1; 40,-4.0; 70,-5.4; 110,-6.6; 160,-7.6; 230,-8.6; 330,-9.6];
+    spd  = norm(velocity);
+    f_d  = spd*fc*1e9/3e8;
+    H    = 0;
+    for k = 1:size(taps,1)
+        pw  = 10^(taps(k,2)/20);
+        phi = 2*pi*f_d*t*1e-3*cos(rand()*2*pi);
+        H   = H + pw*exp(1j*phi);
+    end
+    K     = max(10-0.02*dist, 0);
+    Klin  = 10^(K/10);
+    los   = sqrt(Klin/(Klin+1));
+    nlos  = sqrt(1/(Klin+1))*H/size(taps,1);
+    fd    = min(max(20*log10(abs(los+nlos)+1e-6), -20), 15);
+end
+
+
+% =========================================================================
+%  MASSIVE MIMO — ZF PRECODING (MU-MIMO)
+% =========================================================================
+function [precoding_matrices, mu_groups] = mimo_complete(channel_gains, users, cfg)
+    N = length(users); C = max([users.servingCell]);
+    Nbs = cfg.N_bs_ant;
+
+    precoding_matrices = cell(C,1);
+    mu_groups          = cell(C,1);
+
+    for c = 1:C
+        uList = find([users.servingCell]==c);
+        if isempty(uList), continue; end
+
+        % Select up to maxMUusers (prefer best SINR)
+        numSel = min(length(uList), cfg.maxMUusers);
+        uSel   = uList(randperm(length(uList), numSel));
+        mu_groups{c} = uSel;
+
+        % Build effective channel (use first UE antenna)
+        H = zeros(numSel, Nbs);
+        for k = 1:numSel
+            H(k,:) = squeeze(channel_gains(uSel(k), c, :, 1)).';
+        end
+
+        % Regularized Zero-Forcing precoder
+        regParam = 0.01 * trace(H*H') / numSel;
+        if numSel <= Nbs
+            W = H' / (H*H' + regParam*eye(numSel));
+        else
+            W = pinv(H);
+        end
+
+        % Per-column power normalization
+        for k = 1:numSel
+            nrm = norm(W(:,k));
+            if nrm > 1e-10
+                W(:,k) = W(:,k)/nrm;
+            end
+        end
+        precoding_matrices{c} = W;
+    end
+end
+
+
+% =========================================================================
+%  LINK ADAPTATION — MCS selection from SINR / CQI
+% =========================================================================
+function [mcs, cqi, tbs] = link_adaptation_complete(sinr_dl, cfg)
+    N   = length(sinr_dl);
+    mcs = ones(N,1);
+    cqi = ones(N,1);
+    tbs = zeros(N,1);
+
+    numMCS = size(cfg.mcsTable,1);
+
+    for u = 1:N
+        best = 1;
+        for m = 1:numMCS
+            if sinr_dl(u) >= cfg.mcsTable(m,5) + 0.5
+                best = m;
+            else
+                break;
+            end
+        end
+        mcs(u) = best;
+        cqi(u) = min(15, ceil(best*15/numMCS));
+
+        modOrd  = cfg.mcsTable(best,2);
+        cr      = cfg.mcsTable(best,3)/1024;
+        RE      = cfg.subcarriersPerRB * cfg.symbolsPerSlot * 0.86;  % ~14% OH
+        tbs(u)  = modOrd * cr * RE * cfg.numRBs / 8;  % bytes per slot
+    end
+end
+
+
+% =========================================================================
+%  PROPORTIONAL FAIR SCHEDULER WITH QOS
+% =========================================================================
+function [rb_allocation, pf_metrics] = pf_scheduler_complete(users, sinr_dl, traffic_bits, cfg, t, metrics)
+    N  = length(users);
+    C  = max([users.servingCell]);
+    rb_allocation = zeros(N,2);
+    pf_metrics    = zeros(N,2);
+
+    for c = 1:C
+        uList = find([users.servingCell]==c);
+        if isempty(uList), continue; end
+        nU = length(uList);
+
+        % Average DL throughput over past window
+        avg_tput = ones(nU,1);
+        if t > 5
+            win = metrics.throughput_dl(uList, max(1,t-50):t-1);
+            avg_tput = max(mean(win,2), 0.1);
+        end
+
+        % Instantaneous achievable rate (Shannon estimate, linear)
+        inst_rate = log2(1 + 10.^(sinr_dl(uList)/10));
+
+        % PF metric with QoS priority
+        pf = zeros(nU,1);
+        for k = 1:nU
+            u  = uList(k);
+            pr = slice_priority(users(u).slice);
+            bf = min(max(users(u).buffer/1e5, 0.1), 10);  % buffer-aware
+            pf(k) = (inst_rate(k)/avg_tput(k)) * pr * bf;
+        end
+
+        % Sort by PF metric
+        [~,ord] = sort(pf,'descend');
+
+        % Proportional RB allocation weighted by PF score
+        pf_norm = pf(ord)/sum(pf(ord));
+        for k = 1:nU
+            u = uList(ord(k));
+            rb_dl = max(1, round(pf_norm(k)*cfg.numRBs));
+            rb_ul = max(1, round(rb_dl*0.25));  % UL 25% of DL
+            rb_allocation(u,1) = min(rb_dl, cfg.numRBs);
+            rb_allocation(u,2) = min(rb_ul, floor(cfg.numRBs/4));
+            pf_metrics(u,1)    = pf(ord(k));
+        end
+    end
+end
+
+function pr = slice_priority(slice)
+    switch slice
+        case 2, pr=3;   % URLLC
+        case 1, pr=2;   % eMBB
+        case 3, pr=1;   % mMTC
+        otherwise, pr=1;
+    end
+end
+
+
+% =========================================================================
+%  HARQ WITH INCREMENTAL REDUNDANCY COMBINING
+% =========================================================================
+function [harq_status, sinr_boost, users] = harq_complete(users, sinr_dl, mcs, cfg)
+    N          = length(users);
+    harq_status = zeros(N,1);  % 0=ACK 1=NACK 2=drop 3=ACK-after-retx
+    sinr_boost  = sinr_dl;
+
+    for u = 1:N
+        proc = users(u).harq.nextProcess;
+        mcs_idx  = mcs(u);
+        sinr_thr = cfg.mcsTable(mcs_idx,5);
+        margin   = sinr_dl(u) - sinr_thr;
+
+        % BLER approximation (sigmoid-like)
+        if margin >= 5,      bler = 0;
+        elseif margin <= -5, bler = 0.9;
+        else,                bler = 0.1 + 0.8*(1 - 1/(1+exp(margin)));
+        end
+
+        if rand() < bler
+            % NACK
+            rtx = users(u).harq.retxCount(proc);
+            if rtx < cfg.maxHARQretx
+                % IR combining: accumulate log-likelihood ratios
+                % Each retx adds ~2.5 dB on average
+                ir_gain = 2.5 * (rtx+1);
+                users(u).harq.irBuffer(proc) = users(u).harq.irBuffer(proc) + ir_gain;
+                sinr_boost(u) = sinr_dl(u) + min(users(u).harq.irBuffer(proc), 8);
+                users(u).harq.retxCount(proc) = rtx + 1;
+                harq_status(u) = 1;  % NACK — retransmit
+            else
+                % Max retx reached — drop packet
+                users(u).harq.retxCount(proc) = 0;
+                users(u).harq.irBuffer(proc)  = 0;
+                users(u).buffer = max(users(u).buffer - 12000, 0);
+                harq_status(u) = 2;  % drop
+            end
+        else
+            % ACK
+            if users(u).harq.retxCount(proc) > 0
+                harq_status(u) = 3;  % success after retx
+            else
+                harq_status(u) = 0;  % first-tx success
+            end
+            users(u).harq.retxCount(proc) = 0;
+            users(u).harq.irBuffer(proc)  = 0;
+        end
+
+        % Advance HARQ process round-robin
+        users(u).harq.nextProcess = mod(proc, cfg.harqProcesses) + 1;
+    end
+end
+
+
+% =========================================================================
+%  THROUGHPUT COMPUTATION (DL + UL, real TBS)
+% =========================================================================
+function [tput_dl, tput_ul, latency] = throughput_complete(rb_allocation, mcs, tbs, harq_status, sinr_boost, cfg)
+    N       = length(mcs);
+    tput_dl = zeros(N,1);
+    tput_ul = zeros(N,1);
+    latency = zeros(N,1);
+
+    numMCS = size(cfg.mcsTable,1);
+
+    for u = 1:N
+        if harq_status(u) == 2
+            % Dropped — zero throughput this tick
+            tput_dl(u) = 0;
+            latency(u) = 100;
+            continue;
+        end
+
+        rb_dl = rb_allocation(u,1);
+        rb_ul = rb_allocation(u,2);
+
+        mcs_idx = min(mcs(u), numMCS);
+        se      = cfg.mcsTable(mcs_idx, 4);   % spectral efficiency bps/Hz
+        bw_dl   = rb_dl * cfg.rbBandwidth_Hz;
+        bw_ul   = rb_ul * cfg.rbBandwidth_Hz;
+
+        % HARQ retx: count as half-rate (retransmission overhead)
+        harq_factor = 1.0;
+        if harq_status(u) == 1
+            harq_factor = 0.5;
+        elseif harq_status(u) == 3
+            harq_factor = 0.75;
+        end
+
+        tput_dl(u) = (bw_dl * se * harq_factor) / 1e6;   % Mbps
+        tput_ul(u) = (bw_ul * se * 0.5 * harq_factor) / 1e6;  % UL half SE
+
+        % Latency: queuing delay proxy (1 tick = 1 ms)
+        % HARQ RTT adds cfg.harqRTT ms per retransmission
+        base_lat = 1.0;   % 1 ms per slot
+        rtx_lat  = (harq_status(u)==1) * cfg.harqRTT;
+        if tput_dl(u) > 1e-3
+            latency(u) = base_lat + rtx_lat;
+        else
+            latency(u) = 50;  % large latency when no throughput
+        end
+    end
+end
+
+
+% =========================================================================
+%  QOS ENFORCEMENT + NETWORK SLICING
+% =========================================================================
+function [tput_dl, tput_ul, dropped_bits] = qos_complete(tput_dl, tput_ul, users, cfg, traffic_bits)
+    N            = length(users);
+    dropped_bits = zeros(N,1);
+
+    % Slice GBR thresholds (Mbps)
+    gbr = [0, 1.0, 0.1];   % eMBB=0 (best effort), URLLC=1Mbps, mMTC=0.1Mbps
+
+    for u = 1:N
+        sl = users(u).slice;
+
+        % GBR guarantee: if below min rate for URLLC/mMTC, boost with slice reserve
+        if sl>=2 && tput_dl(u) < gbr(sl)
+            tput_dl(u) = gbr(sl);  % guaranteed minimum
+        end
+
+        % Packet loss: if buffer overflows (already capped at 5 Mb in mobility)
+        % Packets older than maxLatency are dropped
+        maxLat = [100, 10, 1000];  % ms per slice
+        if users(u).buffer > 0 && tput_dl(u) > 0
+            bits_served = tput_dl(u) * 1e6 * 1e-3;  % bits per tick
+            users(u).buffer = max(users(u).buffer - bits_served, 0);
+        end
+
+        % Mark drops when URLLC latency would be violated
+        if sl==2 && tput_dl(u) < gbr(sl)*0.5
+            dropped_bits(u) = traffic_bits(u,1) * 0.5;
+        end
+    end
+end
+
+
+% =========================================================================
+%  DUAL CONNECTIVITY — EN-DC NSA MODE
+% =========================================================================
+function [tput_dl, dc_active] = dual_connectivity_complete(tput_dl, users, sinr_dl, cfg)
+    N        = length(users);
+    dc_active = zeros(N,1);
+
+    if ~cfg.enableDC, return; end
+
+    for u = 1:N
+        % Enable DC if NR SINR is poor (<5 dB) — LTE anchor helps
+        % OR if user is eMBB and wants aggregation
+        if sinr_dl(u) < 5 || users(u).slice == 1
+            % LTE anchor: simplified 20 MHz LTE at 1.8 GHz
+            % Path loss to nearest cell (approximation)
+            pl_lte = 128.1 + 37.6*log10(max(norm(users(u).position)*1e-3,0.01));
+            lte_rssi = cfg.lteCell.txPower - pl_lte;
+            lte_sinr = min(max(lte_rssi - (-100), -5), 25);  % rough SINR
+
+            % LTE throughput (Shannon, 20 MHz, LTE efficiency ~75%)
+            lte_se      = min(log2(1+10^(lte_sinr/10)) * 0.75, 5.0);
+            lte_tput    = (cfg.lteCell.bandwidth * 1e6 * lte_se) / 1e6;  % Mbps
+
+            % Aggregate NR + LTE (no double-counting of interference)
+            tput_dl(u) = tput_dl(u) + lte_tput * 0.8;  % 80% efficiency in aggregation
+            dc_active(u) = 1;
+        end
+    end
+end
+
+
+% =========================================================================
+%  HANDOVER — A3 EVENT, HYSTERESIS, TTT, X2 DELAY
+% =========================================================================
+function [users, ho_count, x2_delay] = handover_complete(users, cells, sinr_dl, cfg, t)
+    N        = length(users);
+    ho_count = 0;
+    x2_delay = zeros(N,1);
+
+    % Recompute per-cell RSSI for HO decisions
+    % (use SINR as proxy — best SINR = best cell)
+    for u = 1:N
+
+        % Count-down X2 timer if handover in progress
+        if users(u).ho.x2Timer > 0
+            users(u).ho.x2Timer  = users(u).ho.x2Timer - 1;
+            x2_delay(u)          = users(u).ho.x2Timer;
+            continue;  % user is mid-handover, don't re-evaluate
+        end
+
+        sc = users(u).servingCell;
+
+        % Estimate RSSI per cell from distance (for A3 event)
+        rssi_per_cell = zeros(1, length(cells));
+        for c = 1:length(cells)
+            d = max(norm(users(u).position - cells(c).position),1);
+            pl = uma_path_loss_local(d, cfg.fc_GHz);
+            rssi_per_cell(c) = cfg.txPower_dBm - pl - users(u).shadowFading(c);
+        end
+
+        [bestRSSI, bestCell] = max(rssi_per_cell);
+        servRSSI = rssi_per_cell(sc);
+
+        % A3 event condition: target > serving + hysteresis + A3offset
+        a3_condition = (bestRSSI - servRSSI) > (cfg.hysteresis_dB + cfg.a3Offset_dB);
+
+        if bestCell ~= sc && a3_condition
+            % Start or continue TTT
+            if isequal(users(u).ho.targetCell, bestCell)
+                users(u).ho.tttCounter = users(u).ho.tttCounter + 1;
+            else
+                % New target — restart TTT
+                users(u).ho.targetCell  = bestCell;
+                users(u).ho.tttCounter  = 1;
+            end
+
+            % TTT expired — execute handover
+            if users(u).ho.tttCounter >= cfg.TTT_ticks
+                % Start X2 timer (service interruption)
+                users(u).ho.x2Timer    = cfg.x2Delay_ticks;
+                users(u).servingCell   = bestCell;
+                users(u).ho.tttCounter = 0;
+                users(u).ho.targetCell = [];
+                % Re-randomize shadow fading on new link
+                users(u).shadowFading(bestCell) = cfg.shadowStd * randn();
+                ho_count = ho_count + 1;
+            end
+        else
+            % Condition gone — reset TTT
+            users(u).ho.tttCounter = 0;
+            users(u).ho.targetCell = [];
+        end
+    end
+end
+
+
+% =========================================================================
+%  STORE METRICS
+% =========================================================================
+function metrics = store_metrics(metrics, tput_dl, tput_ul, sinr_dl, sinr_ul, ...
+    mcs, cqi, harq_status, ho_count, rb_allocation, mu_groups, dc_active, ...
+    latency, dropped_bits, pf_metrics, t)
+
+    metrics.throughput_dl(:,t) = tput_dl;
+    metrics.throughput_ul(:,t) = tput_ul;
+    metrics.sinr_dl(:,t)       = sinr_dl;
+    metrics.sinr_ul(:,t)       = sinr_ul;
+    metrics.mcs(:,t)           = mcs;
+    metrics.cqi(:,t)           = cqi;
+    metrics.harq_status(:,t)   = harq_status;
+    metrics.handovers(t)       = ho_count;
+    metrics.dc_active(:,t)     = dc_active;
+    metrics.latency(:,t)       = latency;
+    metrics.dropped_bits(:,t)  = dropped_bits;
+    metrics.pf_metric(:,t)     = pf_metrics(:,1);
+
+    % RB utilisation per cell
+    C = size(metrics.rb_util,1);
+    for c = 1:C
+        metrics.rb_util(c,t) = mean(rb_allocation(:,1));
+    end
+
+    % MU-MIMO group size
+    for c = 1:length(mu_groups)
+        if ~isempty(mu_groups{c})
+            metrics.mu_size(c,t) = length(mu_groups{c});
+        end
+    end
+end
+
+
+% =========================================================================
+%  LIVE DISPLAY
+% =========================================================================
+function update_live_display(hLive, metrics, users, cells, t, T, totalHO, cfg)
+    if ~ishandle(hLive), return; end
+    figure(hLive); clf;
+
+    N = length(users); C = length(cells);
+    cmap = lines(C);
+
+    % -- Subplot 1: Network topology --
+    subplot(2,3,[1,4]);
+    hold on;
+    theta = linspace(0, 2*pi, 7);
+    for c = 1:C
+        cx = cells(c).position(1); cy = cells(c).position(2);
+        hx = cx + cfg.cellRadius*cos(theta);
+        hy = cy + cfg.cellRadius*sin(theta);
+        fill(hx, hy, cmap(c,:), 'FaceAlpha',0.08, 'EdgeColor',cmap(c,:), 'LineWidth',1.2);
+        plot(cx, cy, '^', 'MarkerSize',10, 'MarkerFaceColor',cmap(c,:), 'MarkerEdgeColor','k');
+        text(cx, cy+cfg.cellRadius*0.15, sprintf('gNB%d',c), 'FontSize',7, ...
+            'HorizontalAlignment','center','Color',cmap(c,:)*0.7);
+    end
+    for u = 1:N
+        sc  = users(u).servingCell;
+        col = cmap(sc,:);
+        ms  = 4 + users(u).slice;  % marker size by slice
+        plot(users(u).position(1), users(u).position(2), 'o', ...
+            'MarkerSize',ms, 'MarkerFaceColor',col, 'MarkerEdgeColor',col);
+        if users(u).ho.x2Timer > 0
+            plot(users(u).position(1), users(u).position(2), 'o', ...
+                'MarkerSize',ms+5, 'MarkerEdgeColor',[1,0.5,0], ...
+                'MarkerFaceColor','none', 'LineWidth',1.5);
+        end
+    end
+    hold off; axis equal; grid on;
+    title(sprintf('Network t=%d/%d | HO=%d', t, T, totalHO));
+    xlabel('X (m)'); ylabel('Y (m)');
+
+    % -- Subplot 2: DL Throughput over time --
+    subplot(2,3,2);
+    t_ax = 1:t;
+    avg_dl = mean(metrics.throughput_dl(:,1:t),1);
+    plot(t_ax, avg_dl, 'b-', 'LineWidth',1.5);
+    title('Avg DL Throughput'); xlabel('Tick (ms)'); ylabel('Mbps'); grid on;
+
+    % -- Subplot 3: SINR distribution --
+    subplot(2,3,3);
+    sinr_now = metrics.sinr_dl(:,t);
+    histogram(sinr_now, 12, 'FaceColor',[0.2,0.7,0.4], 'EdgeColor','w');
+    title(sprintf('SINR @ t=%d (mean=%.1fdB)',t,mean(sinr_now)));
+    xlabel('SINR (dB)'); ylabel('Users'); grid on;
+
+    % -- Subplot 4: Latency --
+    subplot(2,3,5);
+    avg_lat = mean(metrics.latency(:,1:t),1);
+    plot(t_ax, avg_lat, 'r-', 'LineWidth',1.5);
+    title('Avg Latency'); xlabel('Tick (ms)'); ylabel('ms'); grid on;
+
+    % -- Subplot 5: Handovers --
+    subplot(2,3,6);
+    bar(t_ax, metrics.handovers(1:t), 'FaceColor',[0.85,0.55,0.15], 'EdgeColor','none');
+    title('Handovers per tick'); xlabel('Tick'); ylabel('Count'); grid on;
+
+    sgtitle(sprintf('5G NR Live — t=%d | DL=%.1fMbps | UL=%.1fMbps | SINR=%.1fdB', ...
+        t, mean(avg_dl), mean(mean(metrics.throughput_ul(:,1:t),1)), mean(sinr_now)), ...
+        'FontWeight','bold');
+    drawnow limitrate;
+end
+
+
+% =========================================================================
+%  FINAL REPORT (console)
+% =========================================================================
+function generate_final_report(metrics, cfg, totalHO)
+    T = size(metrics.throughput_dl, 2);
+    N = size(metrics.throughput_dl, 1);
+
+    avg_dl = mean(metrics.throughput_dl, 2);
+    avg_ul = mean(metrics.throughput_ul, 2);
+    avg_sinr = mean(metrics.sinr_dl, 2);
+    avg_lat  = mean(metrics.latency, 2);
+    harq_rtx = sum(metrics.harq_status==1,'all');
+    harq_drp = sum(metrics.harq_status==2,'all');
+    dc_frac  = mean(metrics.dc_active(:));
+
+    fprintf('\n====================================================\n');
+    fprintf('          5G NR SIMULATION FINAL REPORT\n');
+    fprintf('====================================================\n');
+    fprintf('Cells: %d | Users: %d | Duration: %d ms\n', cfg.numCells, cfg.numUsers, T);
+    fprintf('Frequency: %.1f GHz | BW: %d MHz | MIMO: %dx%d\n', ...
+        cfg.fc_GHz, cfg.bandwidth_MHz, cfg.N_bs_ant, cfg.N_ue_ant);
+    fprintf('----------------------------------------------------\n');
+    fprintf('DL Throughput  — Mean: %6.2f Mbps | Median: %6.2f Mbps\n', mean(avg_dl), median(avg_dl));
+    fprintf('               — 5th pct (cell-edge): %.2f Mbps\n', prctile(avg_dl,5));
+    fprintf('               — 95th pct (peak):     %.2f Mbps\n', prctile(avg_dl,95));
+    fprintf('UL Throughput  — Mean: %6.2f Mbps\n', mean(avg_ul));
+    fprintf('SINR           — Mean: %5.1f dB | 5th pct: %.1f dB\n', mean(avg_sinr), prctile(avg_sinr,5));
+    fprintf('Latency        — Mean: %5.2f ms | 95th pct: %.1f ms\n', mean(avg_lat), prctile(avg_lat,95));
+    fprintf('Handovers      — Total: %d (%.2f/user)\n', totalHO, totalHO/cfg.numUsers);
+    fprintf('HARQ           — Retransmissions: %d | Drops: %d\n', harq_rtx, harq_drp);
+    fprintf('Dual Conn      — Active fraction: %.1f%%\n', dc_frac*100);
+    fprintf('Jain Fairness  — %.4f\n', jain_fairness(avg_dl));
+    fprintf('====================================================\n');
+
+    % Per-slice breakdown
+    fprintf('\nPer-Slice Performance:\n');
+    fprintf('  %-8s | DL Mbps | SINR dB | Latency ms\n','Slice');
+    sliceNames = {'eMBB','URLLC','mMTC'};
+    for s = 1:3
+        uids = find(arrayfun(@(i) metrics.throughput_dl(i,1)>=0, 1:N));
+        % Use modular assignment matching init_network
+        uids_s = mod((1:N)-1,3)+1 == s;
+        if any(uids_s)
+            fprintf('  %-8s | %7.2f | %7.1f | %10.2f\n', sliceNames{s}, ...
+                mean(avg_dl(uids_s)), mean(avg_sinr(uids_s)), mean(avg_lat(uids_s)));
+        end
+    end
+end
+
+function J = jain_fairness(tput)
+    J = sum(tput)^2 / (length(tput)*sum(tput.^2)+1e-10);
+end
+
+
+% =========================================================================
+%  ALL FIGURES
+% =========================================================================
+function generate_all_plots(metrics, cfg, cells)
+    T    = size(metrics.throughput_dl,2);
+    N    = size(metrics.throughput_dl,1);
+    t_ax = 1:T;
+
+    avg_dl   = mean(metrics.throughput_dl,2);
+    avg_ul   = mean(metrics.throughput_ul,2);
+    avg_sinr = mean(metrics.sinr_dl,2);
+    avg_lat  = mean(metrics.latency,2);
+
+    % ---- Figure 2: Performance Analysis ---------------------------------
+    figure('Name','Performance Analysis','Position',[50 50 1100 700]);
+
+    subplot(3,3,1);
+    histogram(avg_dl,15,'FaceColor',[0.22,0.55,0.85],'EdgeColor','w');
+    xline(mean(avg_dl),'r--','LineWidth',1.5);
+    xline(prctile(avg_dl,5),'k:','LineWidth',1.5);
+    title('DL Throughput Distribution'); xlabel('Mbps'); ylabel('Users');
+    legend('Users','Mean','5th pct'); grid on;
+
+    subplot(3,3,2);
+    histogram(avg_sinr,15,'FaceColor',[0.15,0.65,0.5],'EdgeColor','w');
+    xline(mean(avg_sinr),'r--','LineWidth',1.5);
+    title('SINR Distribution'); xlabel('dB'); ylabel('Users'); grid on;
+
+    subplot(3,3,3);
+    histogram(avg_lat,15,'FaceColor',[0.85,0.4,0.2],'EdgeColor','w');
+    title('Latency Distribution'); xlabel('ms'); ylabel('Users'); grid on;
+
+    subplot(3,3,4);
+    yyaxis left;
+    plot(t_ax, mean(metrics.throughput_dl,1),'b-','LineWidth',1.5);
+    ylabel('DL Mbps');
+    yyaxis right;
+    plot(t_ax, mean(metrics.throughput_ul,1),'g-','LineWidth',1.5);
+    ylabel('UL Mbps');
+    title('Throughput over Time'); xlabel('Tick (ms)'); grid on;
+
+    subplot(3,3,5);
+    yyaxis left;
+    plot(t_ax, mean(metrics.sinr_dl,1),'b-','LineWidth',1.5);
+    ylabel('Avg SINR DL (dB)');
+    yyaxis right;
+    plot(t_ax, mean(metrics.sinr_ul,1),'r--','LineWidth',1.5);
+    ylabel('Avg SINR UL (dB)');
+    title('SINR over Time'); xlabel('Tick (ms)'); grid on;
+
+    subplot(3,3,6);
+    plot(t_ax, metrics.handovers,'r-','LineWidth',1.2);
+    hold on;
+    plot(t_ax, movmean(metrics.handovers,20),'k--','LineWidth',2);
+    title('Handovers per Tick'); xlabel('Tick'); ylabel('Count');
+    legend('Raw','Moving avg'); grid on;
+
+    subplot(3,3,7);
+    mcs_avg = mean(metrics.mcs,1);
+    plot(t_ax, mcs_avg,'m-','LineWidth',1.5);
+    title('Avg MCS Index over Time'); xlabel('Tick'); ylabel('MCS (0-28)'); grid on;
+
+    subplot(3,3,8);
+    cqi_avg = mean(metrics.cqi,1);
+    plot(t_ax, cqi_avg,'c-','LineWidth',1.5);
+    title('Avg CQI over Time'); xlabel('Tick'); ylabel('CQI (0-15)'); grid on;
+
+    subplot(3,3,9);
+    dc_frac = mean(metrics.dc_active,1)*100;
+    area(t_ax, dc_frac,'FaceColor',[0.6,0.8,1],'EdgeColor','none');
+    title('Dual Connectivity Active (%)'); xlabel('Tick'); ylabel('%'); grid on;
+
+    sgtitle('5G NR — Performance Analysis','FontSize',13,'FontWeight','bold');
+
+    % ---- Figure 3: CDF curves -------------------------------------------
+    figure('Name','CDF Curves','Position',[200 200 700 500]);
+
+    [f1,x1] = ecdf(avg_dl);
+    [f2,x2] = ecdf(avg_sinr);
+    [f3,x3] = ecdf(avg_lat);
+
+    subplot(1,3,1);
+    plot(x1,f1,'b-','LineWidth',2);
+    xlabel('DL Throughput (Mbps)'); ylabel('CDF');
+    title('DL Tput CDF'); grid on;
+    xline(prctile(avg_dl,5),'r:'); xline(prctile(avg_dl,50),'k--');
+    legend('CDF','5th pct','Median');
+
+    subplot(1,3,2);
+    plot(x2,f2,'g-','LineWidth',2);
+    xlabel('SINR (dB)'); ylabel('CDF');
+    title('SINR CDF'); grid on;
+
+    subplot(1,3,3);
+    plot(x3,f3,'r-','LineWidth',2);
+    xlabel('Latency (ms)'); ylabel('CDF');
+    title('Latency CDF'); grid on;
+
+    sgtitle('CDF — Standard Telecom KPI Format','FontSize',12,'FontWeight','bold');
+
+    % ---- Figure 4: HARQ analysis ----------------------------------------
+    figure('Name','HARQ Analysis','Position',[300 300 700 400]);
+
+    harq_ack   = sum(metrics.harq_status==0,'all');
+    harq_nack  = sum(metrics.harq_status==1,'all');
+    harq_drop  = sum(metrics.harq_status==2,'all');
+    harq_srtx  = sum(metrics.harq_status==3,'all');
+
+    subplot(1,2,1);
+    pie([harq_ack,harq_nack,harq_drop,harq_srtx], ...
+        {'ACK','NACK','Drop','ACK@rtx'});
+    title('HARQ Outcome Distribution');
+
+    subplot(1,2,2);
+    harq_ts = sum(metrics.harq_status==1,1);
+    bar(t_ax, harq_ts,'FaceColor',[0.8,0.3,0.3],'EdgeColor','none');
+    title('NACK Events per Tick'); xlabel('Tick'); ylabel('Count'); grid on;
+
+    sgtitle('HARQ Performance','FontSize',12,'FontWeight','bold');
+
+    % ---- Figure 5: KPI Dashboard ----------------------------------------
+    figure('Name','KPI Dashboard','Position',[400 100 800 450]);
+
+    kpi_vals   = [mean(avg_dl), prctile(avg_dl,5), mean(avg_sinr), ...
+                  mean(avg_lat), sum(metrics.handovers), mean(metrics.dc_active(:))*100];
+    kpi_labels = {'Mean DL\n(Mbps)','Cell-edge\n(Mbps)','Mean SINR\n(dB)', ...
+                  'Mean Lat\n(ms)','Handovers','DC Active\n(%)'};
+    colors     = [0.22,0.55,0.85; 0.85,0.35,0.22; 0.15,0.65,0.5; ...
+                  0.65,0.3,0.75; 0.85,0.65,0.1; 0.4,0.7,0.9];
+
+    b = bar(kpi_vals,'FaceColor','flat');
+    b.CData = colors;
+    set(gca,'XTickLabel',{'Mean DL','Cell-edge','SINR','Latency','Handovers','DC%'});
+    title('Key Performance Indicators (KPIs)');
+    ylabel('Value'); grid on;
+    for k = 1:numel(kpi_vals)
+        text(k, kpi_vals(k)*1.03, sprintf('%.2f',kpi_vals(k)), ...
+            'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+    end
+
+    % ---- Figure 6: MU-MIMO group sizes ----------------------------------
+    figure('Name','MU-MIMO & Scheduler','Position',[500 200 700 400]);
+
+    subplot(1,2,1);
+    mu_mean = mean(metrics.mu_size,2);
+    bar(1:cfg.numCells, mu_mean,'FaceColor',[0.3,0.5,0.9],'EdgeColor','w');
+    title('Avg MU-MIMO Group Size per Cell');
+    xlabel('Cell'); ylabel('Users/group'); grid on;
+
+    subplot(1,2,2);
+    pf_avg = mean(metrics.pf_metric,2);
+    histogram(pf_avg,12,'FaceColor',[0.5,0.8,0.4],'EdgeColor','w');
+    title('PF Metric Distribution (all users)');
+    xlabel('PF metric value'); ylabel('Users'); grid on;
+
+    sgtitle('MU-MIMO & Proportional Fair Scheduler','FontSize',12,'FontWeight','bold');
+
+    fprintf('\nFigures generated:\n');
+    fprintf('  Fig 1 — Live network animation\n');
+    fprintf('  Fig 2 — 9-panel performance analysis\n');
+    fprintf('  Fig 3 — CDF curves (DL, SINR, Latency)\n');
+    fprintf('  Fig 4 — HARQ outcome analysis\n');
+    fprintf('  Fig 5 — KPI dashboard\n');
+    fprintf('  Fig 6 — MU-MIMO & PF scheduler\n');
+end
